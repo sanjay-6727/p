@@ -1,0 +1,863 @@
+=====================================================================
+ CN LAB - ALL EXAM CODE (SOCKETS IN C, NS-3 IN C++)
+ Each program: save as the file name shown, compile, run as shown.
+=====================================================================
+
+COMPILE CHEAT:
+  C programs : gcc file.c -o name          (add -pthread for the threaded server)
+  NS-3       : copy to ns-3 folder/scratch/, then  ./ns3 run scratch/file
+               with arguments:  ./ns3 run "scratch/file --bw=5Mbps"
+  Always start the SERVER first (own terminal), then the CLIENT.
+  Ports used are above 1024 (ports below need root).
+
+students.csv (make this file in the same folder as the server):
+  101,Arun,CSE,5,8.7
+  102,Meena,IT,3,9.1
+  103,Ravi,ECE,4,7.9
+
+
+=====================================================================
+ 1. TCP STUDENT SERVER (multi-client with pthread)   -> tcp_server.c
+    gcc tcp_server.c -o tcp_server -pthread && ./tcp_server
+=====================================================================
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+
+// each client runs in its own thread
+void *handle(void *arg) {
+    int c = *(int *)arg;
+    free(arg);
+    char roll[100] = {0}, line[200], r[50];
+    recv(c, roll, 99, 0);                       // roll number from client
+    roll[strcspn(roll, "\r\n")] = 0;            // strip newline
+    char reply[200] = "Student Record Not Found";
+    FILE *f = fopen("students.csv", "r");
+    while (f && fgets(line, 200, f)) {
+        sscanf(line, "%49[^,]", r);             // first field = roll number
+        if (strcmp(r, roll) == 0) { strcpy(reply, line); break; }  // full record
+    }
+    if (f) fclose(f);
+    send(c, reply, strlen(reply), 0);
+    close(c);                                   // graceful close
+    return NULL;
+}
+
+int main() {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    int opt = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(8080);
+    a.sin_addr.s_addr = INADDR_ANY;
+    bind(s, (struct sockaddr *)&a, sizeof(a));
+    listen(s, 5);
+    printf("TCP server on 8080\n");
+    while (1) {                                 // keep accepting clients
+        int *c = malloc(sizeof(int));
+        *c = accept(s, NULL, NULL);
+        pthread_t t;
+        pthread_create(&t, NULL, handle, c);    // one thread per client
+        pthread_detach(t);
+    }
+}
+
+
+=====================================================================
+ 2. TCP STUDENT CLIENT                               -> tcp_client.c
+    gcc tcp_client.c -o tcp_client && ./tcp_client
+=====================================================================
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+
+int main() {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(8080);
+    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+    connect(s, (struct sockaddr *)&a, sizeof(a));
+
+    char roll[100], buf[200] = {0};
+    printf("Roll number: ");
+    scanf("%99s", roll);
+    send(s, roll, strlen(roll), 0);
+    recv(s, buf, 199, 0);
+    printf("Server: %s\n", buf);
+    close(s);
+    return 0;
+}
+
+
+=====================================================================
+ 3. UDP STUDENT SERVER (only roll number + name)     -> udp_server.c
+    gcc udp_server.c -o udp_server && ./udp_server
+=====================================================================
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+
+int main() {
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in a = {0}, c;
+    socklen_t cl = sizeof(c);
+    a.sin_family = AF_INET;
+    a.sin_port = htons(8081);
+    a.sin_addr.s_addr = INADDR_ANY;
+    bind(s, (struct sockaddr *)&a, sizeof(a));
+    printf("UDP server on 8081\n");
+    while (1) {
+        char roll[100] = {0}, line[200], r[50], n[50], reply[200] = "Student Record Not Found";
+        // recvfrom also gives the client's address, needed to reply
+        recvfrom(s, roll, 99, 0, (struct sockaddr *)&c, &cl);
+        roll[strcspn(roll, "\r\n")] = 0;
+        FILE *f = fopen("students.csv", "r");
+        while (f && fgets(line, 200, f)) {
+            sscanf(line, "%49[^,],%49[^,]", r, n);
+            if (strcmp(r, roll) == 0) { sprintf(reply, "%s %s", r, n); break; }
+        }
+        if (f) fclose(f);
+        sendto(s, reply, strlen(reply), 0, (struct sockaddr *)&c, cl);
+    }
+}
+
+
+=====================================================================
+ 4. UDP STUDENT CLIENT                               -> udp_client.c
+    gcc udp_client.c -o udp_client && ./udp_client
+=====================================================================
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+
+int main() {
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(8081);
+    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+
+    char roll[100], buf[200] = {0};
+    printf("Roll number: ");
+    scanf("%99s", roll);
+    sendto(s, roll, strlen(roll), 0, (struct sockaddr *)&a, sizeof(a));
+    recvfrom(s, buf, 199, 0, NULL, NULL);
+    printf("Server: %s\n", buf);
+    return 0;
+}
+
+
+=====================================================================
+ 5. TCP vs UDP COMPARISON (answer for 1c)
+=====================================================================
+ Connection    : TCP connection-oriented (3-way handshake: listen/accept/connect).
+                 UDP connectionless (just sendto/recvfrom).
+ Reliability   : TCP reliable (ACKs, retransmission, checksum). UDP unreliable,
+                 datagram may be lost or duplicated, no ACKs.
+ Ordering      : TCP delivers bytes in order (sequence numbers). UDP gives no
+                 ordering guarantee.
+ Error recovery: TCP detects loss and retransmits, with flow/congestion control.
+                 UDP only has an optional checksum; the application must recover.
+ Communication : TCP is a byte stream (no message boundaries), higher overhead
+                 (20-byte header, state). UDP preserves message boundaries,
+                 8-byte header, lower latency, suits short queries and real time.
+
+
+=====================================================================
+ 6. DNS SIMULATION OVER UDP - SERVER                 -> dns_server.c
+    gcc dns_server.c -o dns_server && ./dns_server
+=====================================================================
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+
+// DNS table: hostname -> IP
+char *name[] = {"google.com", "ssn.edu.in", "example.com", "github.com"};
+char *ipaddr[] = {"142.250.1.1", "10.0.0.5", "93.184.216.34", "140.82.1.1"};
+
+int main() {
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in a = {0}, c;
+    socklen_t cl = sizeof(c);
+    a.sin_family = AF_INET;
+    a.sin_port = htons(5300);
+    a.sin_addr.s_addr = INADDR_ANY;
+    bind(s, (struct sockaddr *)&a, sizeof(a));
+    printf("DNS server on 5300\n");
+    while (1) {
+        char q[100] = {0}, reply[100];
+        recvfrom(s, q, 99, 0, (struct sockaddr *)&c, &cl);
+        q[strcspn(q, "\r\n")] = 0;
+        if (strcmp(q, "timeout.com") == 0) continue;     // simulate timeout: no reply
+        if (!strchr(q, '.') || strchr(q, ' '))
+            strcpy(reply, "ERROR: Invalid format");      // invalid format
+        else {
+            strcpy(reply, "NXDOMAIN");                   // default: not found
+            for (int i = 0; i < 4; i++)
+                if (strcmp(q, name[i]) == 0) strcpy(reply, ipaddr[i]);
+        }
+        sendto(s, reply, strlen(reply), 0, (struct sockaddr *)&c, cl);
+    }
+}
+
+
+=====================================================================
+ 7. DNS CLIENT WITH CACHE + TIMEOUT                  -> dns_client.c
+    gcc dns_client.c -o dns_client && ./dns_client
+    Type domains (google.com twice shows the cache), "bad" = invalid,
+    "nope.com" = NXDOMAIN, "timeout.com" = timeout, "exit" to stop.
+=====================================================================
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+
+char cname[10][100], cip[10][100];   // client-side cache
+int cn = 0;
+
+int main() {
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    struct timeval tv = {2, 0};      // 2 second receive timeout
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(5300);
+    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+
+    char d[100], buf[100];
+    while (1) {
+        printf("Domain: ");
+        scanf("%99s", d);
+        if (strcmp(d, "exit") == 0) break;
+
+        int hit = 0;                                     // 1. look in cache first
+        for (int i = 0; i < cn; i++)
+            if (strcmp(cname[i], d) == 0) { printf("CACHE HIT: %s\n", cip[i]); hit = 1; }
+        if (hit) continue;
+
+        struct timespec t1, t2;                          // 2. ask the server, time the RTT
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        sendto(s, d, strlen(d), 0, (struct sockaddr *)&a, sizeof(a));
+        memset(buf, 0, 100);
+        int n = recvfrom(s, buf, 99, 0, NULL, NULL);
+        clock_gettime(CLOCK_MONOTONIC, &t2);
+        if (n < 0) { printf("TIMEOUT: no reply\n"); continue; }   // 3. timeout
+
+        double rtt = (t2.tv_sec - t1.tv_sec) * 1000 + (t2.tv_nsec - t1.tv_nsec) / 1e6;
+        printf("Reply: %s  (RTT %.3f ms)\n", buf, rtt);
+        if (buf[0] >= '0' && buf[0] <= '9' && cn < 10) {   // 4. cache valid answers only
+            strcpy(cname[cn], d); strcpy(cip[cn], buf); cn++;
+        }
+    }
+    return 0;
+}
+
+ UDP suitability (for the analysis): tiny single-packet query/response, no
+ handshake so lowest latency and overhead (8-byte header); unreliability is
+ handled by the client timeout + retry; fine for DNS, TCP only needed for
+ large responses and zone transfers.
+
+
+=====================================================================
+ 8. HTTP CLIENT OVER TCP                             -> http_client.c
+    Terminal 1 (folder with index.html, notes.txt, sample.pdf, image.jpg):
+        python3 -m http.server 8000
+    Terminal 2:
+        gcc http_client.c -o http_client && ./http_client
+        Enter URL: http://localhost:8000/sample.pdf
+    Check the copy:  cmp sample.pdf downloaded_sample.pdf   (no output = same)
+=====================================================================
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <netdb.h>
+#include <time.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+
+char data[10000000];                 // global: holds the whole reply (10 MB)
+
+double now() {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec + t.tv_nsec / 1e9;
+}
+
+int main() {
+    char url[300], host[100], path[200] = "/", req[400], out[250];
+    int port = 80;
+    printf("Enter URL: ");
+    scanf("%299s", url);
+    // split URL into host, port, path
+    if (sscanf(url, "http://%99[^:]:%d%199s", host, &port, path) < 2) {
+        port = 80;
+        sscanf(url, "http://%99[^/]%199s", host, path);
+    }
+
+    struct hostent *h = gethostbyname(host);            // name -> IP
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(port);
+    a.sin_addr = *(struct in_addr *)h->h_addr_list[0];
+
+    double t0 = now();
+    connect(s, (struct sockaddr *)&a, sizeof(a));
+    sprintf(req, "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", path, host);
+    double t_send = now();
+    send(s, req, strlen(req), 0);
+
+    int total = 0, n;
+    double t_first = 0;
+    while ((n = recv(s, data + total, 100000, 0)) > 0) {   // read until server closes
+        if (total == 0) t_first = now();                   // first byte time
+        total += n;
+    }
+    double t_end = now();
+    data[total] = 0;
+
+    if (!strstr(data, "200 OK")) { printf("Not found / failed\n"); return 0; }
+    char *body = strstr(data, "\r\n\r\n") + 4;             // skip HTTP headers
+    int size = total - (body - data);
+
+    char *nm = strrchr(path, '/') + 1;
+    sprintf(out, "downloaded_%s", *nm ? nm : "index.html");
+    FILE *fp = fopen(out, "wb");                           // "wb" so PDF/images stay intact
+    fwrite(body, 1, size, fp);
+    fclose(fp);
+
+    double dl = t_end - t_first;
+    printf("Saved       : %s\n", out);
+    printf("Data size   : %d bytes\n", size);
+    printf("Response t  : %.4f s\n", t_first - t_send);
+    printf("Download t  : %.4f s\n", dl);
+    printf("Total time  : %.4f s\n", t_end - t0);
+    if (dl > 0) printf("Throughput  : %.2f Mbps\n", size * 8 / dl / 1e6);
+    return 0;
+}
+
+
+=====================================================================
+ 9. CHECKSUM OVER TCP - RECEIVER (server first)      -> cs_server.c
+    gcc cs_server.c -o cs_server && ./cs_server
+=====================================================================
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+
+int main() {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    int opt = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(8090);
+    a.sin_addr.s_addr = INADDR_ANY;
+    bind(s, (struct sockaddr *)&a, sizeof(a));
+    listen(s, 5);
+    int c = accept(s, NULL, NULL);
+    char buf[300] = {0};
+    recv(c, buf, 299, 0);               // "n w0 w1 ... checksum"
+
+    int sum = 0, v;
+    char *tok = strtok(buf, " ");
+    int n = atoi(tok);
+    for (int i = 0; i <= n; i++) {      // n data words + the checksum word
+        tok = strtok(NULL, " ");
+        v = atoi(tok);
+        sum += v;
+        if (sum > 255) sum = (sum & 255) + 1;       // end-around carry
+        printf("word %d -> running sum %d\n", v, sum);
+    }
+    // receiver: data sum + checksum must be 255 (all ones) if no error
+    printf("Final sum = %d -> %s\n", sum, sum == 255 ? "NO ERROR" : "ERROR DETECTED");
+    close(c);
+    return 0;
+}
+
+
+=====================================================================
+ 10. CHECKSUM - SENDER                               -> cs_client.c
+     gcc cs_client.c -o cs_client && ./cs_client
+     e.g. n=3, words 10 20 30. Say k=1 to corrupt word 1 (shows an error).
+=====================================================================
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+
+int main() {
+    int n, w[50], sum = 0, k;
+    printf("How many 8-bit words: ");
+    scanf("%d", &n);
+    printf("Enter words (0-255): ");
+    for (int i = 0; i < n; i++) scanf("%d", &w[i]);
+
+    for (int i = 0; i < n; i++) {
+        sum += w[i];
+        int carry = sum > 255;
+        if (carry) sum = (sum & 255) + 1;           // 1's complement add, end-around carry
+        printf("add %d -> sum %d carry %d\n", w[i], sum, carry);
+    }
+    int chk = ~sum & 255;                           // checksum = complement of the sum
+    printf("Sum = %d, Checksum = %d\n", sum, chk);
+
+    printf("Corrupt word index (-1 = none): ");
+    scanf("%d", &k);
+    if (k >= 0 && k < n) w[k] ^= 1;                 // flip one bit AFTER computing checksum
+
+    char msg[300] = "", t[20];
+    sprintf(msg, "%d", n);
+    for (int i = 0; i < n; i++) { sprintf(t, " %d", w[i]); strcat(msg, t); }
+    sprintf(t, " %d", chk); strcat(msg, t);
+
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(8090);
+    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+    connect(s, (struct sockaddr *)&a, sizeof(a));
+    send(s, msg, strlen(msg), 0);
+    close(s);
+    return 0;
+}
+
+
+=====================================================================
+ 11. CRC OVER TCP - RECEIVER (server first)          -> crc_server.c
+     gcc crc_server.c -o crc_server && ./crc_server
+=====================================================================
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+
+// XOR long division of bit-string d by generator g; remainder written to r
+void crc(char *d, char *g, char *r) {
+    int n = strlen(g), m = strlen(d);
+    char t[200];
+    strcpy(t, d);
+    for (int i = 0; i <= m - n; i++)
+        if (t[i] == '1')
+            for (int j = 0; j < n; j++)
+                t[i + j] = (t[i + j] == g[j]) ? '0' : '1';
+    strcpy(r, t + m - n + 1);
+}
+
+int main() {
+    char g[] = "10011";                 // G(x) = x^4 + x + 1
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    int opt = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(8091);
+    a.sin_addr.s_addr = INADDR_ANY;
+    bind(s, (struct sockaddr *)&a, sizeof(a));
+    listen(s, 5);
+    int c = accept(s, NULL, NULL);
+    char frame[200] = {0}, rem[20];
+    recv(c, frame, 199, 0);
+    crc(frame, g, rem);                 // receiver recomputes CRC on the whole frame
+    printf("Received: %s\nRemainder: %s\n", frame, rem);
+    printf("%s\n", strchr(rem, '1') ? "ERROR DETECTED" : "NO ERROR (frame ok)");
+    close(c);
+    return 0;
+}
+
+
+=====================================================================
+ 12. CRC OVER TCP - SENDER                           -> crc_client.c
+     gcc crc_client.c -o crc_client && ./crc_client
+     data 1101011011  -> CRC 1110, frame 11010110111110
+     give a bit position (0-based) to flip, or -1 for no error
+=====================================================================
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+
+void crc(char *d, char *g, char *r) {
+    int n = strlen(g), m = strlen(d);
+    char t[200];
+    strcpy(t, d);
+    for (int i = 0; i <= m - n; i++)
+        if (t[i] == '1')
+            for (int j = 0; j < n; j++)
+                t[i + j] = (t[i + j] == g[j]) ? '0' : '1';
+    strcpy(r, t + m - n + 1);
+}
+
+int main() {
+    char g[] = "10011", data[100], t[200], rem[20], frame[200];
+    printf("Data bits: ");
+    scanf("%99s", data);
+    strcpy(t, data);
+    for (int i = 0; i < strlen(g) - 1; i++) strcat(t, "0");   // append n-1 zeros
+    crc(t, g, rem);                                           // sender CRC
+    sprintf(frame, "%s%s", data, rem);                        // data + CRC
+    printf("CRC: %s\nFrame: %s\n", rem, frame);
+
+    int k;
+    printf("Flip bit position (-1 = none): ");
+    scanf("%d", &k);
+    if (k >= 0 && k < strlen(frame)) frame[k] = frame[k] == '0' ? '1' : '0';   // manual error
+
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(8091);
+    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+    connect(s, (struct sockaddr *)&a, sizeof(a));
+    send(s, frame, strlen(frame), 0);
+    close(s);
+    return 0;
+}
+
+
+=====================================================================
+ 13. WIRESHARK (no code) - FILTERS TO TYPE
+=====================================================================
+ http | dns | udp.port == 53 | tcp | icmp | arp | tls | ip
+ Run:  nslookup google.com   or   dig google.com   to make DNS traffic.
+ Answer from the packet details: HTTP version, status code (200 / 304),
+ Last-Modified, Content-Length, If-Modified-Since (2nd GET), IPs, number
+ of GETs, number of TCP segments.
+
+
+=====================================================================
+ 14. NS-3 WIRED: TCP + UDP THROUGH 2 ROUTERS         -> scratch/wired.cc
+     ./ns3 run scratch/wired
+     ./ns3 run "scratch/wired --bw=5Mbps"      (and 10Mbps)
+     Other experiments: edit 1e6 (UDP rate: 5e5, 2e6, 5e6),
+        "50p" (queue: 20p, 100p), "10ms" (delay: 5ms, 20ms, 50ms), rerun.
+     TCP retransmission rate ~ TCP loss % (say this is your approximation).
+     Tags: [CS] = copied from cheat sheet, [YOU] = write by hand
+=====================================================================
+#include "ns3/core-module.h"
+#include "ns3/network-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/point-to-point-module.h"
+#include "ns3/applications-module.h"
+#include "ns3/flow-monitor-module.h"
+#include "ns3/traffic-control-module.h"
+using namespace ns3;
+
+int main(int argc, char *argv[]) {
+    std::string bw = "2Mbps";                               // [YOU] command-line value
+    CommandLine cmd;
+    cmd.AddValue("bw", "bottleneck", bw);
+    cmd.Parse(argc, argv);
+
+    // [CS 5] TCP settings (TcpNewReno / TcpCubic / TcpBbr)
+    Config::SetDefault("ns3::TcpL4Protocol::SocketType", StringValue("ns3::TcpNewReno"));
+    Config::SetDefault("ns3::TcpSocket::SegmentSize", UintegerValue(1024));
+
+    NodeContainer hosts, routers;                           // [CS 2]
+    hosts.Create(4);                                        // n0 n1 n2 n3
+    routers.Create(2);                                      // r1 r2
+
+    InternetStackHelper internet;                           // [CS 4]
+    internet.Install(hosts);
+    internet.Install(routers);
+
+    PointToPointHelper access, btl;                         // [CS 3]
+    access.SetDeviceAttribute("DataRate", StringValue("10Mbps"));
+    access.SetChannelAttribute("Delay", StringValue("2ms"));
+    access.SetQueue("ns3::DropTailQueue<Packet>", "MaxSize", StringValue("50p"));
+    btl.SetDeviceAttribute("DataRate", StringValue(bw));
+    btl.SetChannelAttribute("Delay", StringValue("10ms"));
+    btl.SetQueue("ns3::DropTailQueue<Packet>", "MaxSize", StringValue("50p"));
+
+    // [YOU] one Install per link from the topology picture
+    NetDeviceContainer d0 = access.Install(hosts.Get(0), routers.Get(0));   // n0-r1
+    NetDeviceContainer d1 = access.Install(hosts.Get(1), routers.Get(0));   // n1-r1
+    NetDeviceContainer dB = btl.Install(routers.Get(0), routers.Get(1));    // r1-r2 bottleneck
+    NetDeviceContainer d2 = access.Install(routers.Get(1), hosts.Get(2));   // r2-n2
+    NetDeviceContainer d3 = access.Install(routers.Get(1), hosts.Get(3));   // r2-n3
+
+    Ipv4AddressHelper ip;                                   // [CS 4] one subnet per link
+    ip.SetBase("10.1.1.0", "255.255.255.0"); ip.Assign(d0);
+    ip.SetBase("10.1.2.0", "255.255.255.0"); ip.Assign(d1);
+    ip.SetBase("10.1.3.0", "255.255.255.0"); ip.Assign(dB);
+    ip.SetBase("10.1.4.0", "255.255.255.0"); Ipv4InterfaceContainer i2 = ip.Assign(d2);
+    ip.SetBase("10.1.5.0", "255.255.255.0"); Ipv4InterfaceContainer i3 = ip.Assign(d3);
+    Ipv4GlobalRoutingHelper::PopulateRoutingTables();       // [CS 4]
+
+    TrafficControlHelper tch;                               // [CS 3] remove default queue-disc
+    tch.Uninstall(d0); tch.Uninstall(d1); tch.Uninstall(dB);
+    tch.Uninstall(d2); tch.Uninstall(d3);
+
+    // [CS 6] TCP flow n0 -> n3 (port 8080)
+    PacketSinkHelper tcpSink("ns3::TcpSocketFactory", InetSocketAddress(Ipv4Address::GetAny(), 8080));
+    ApplicationContainer ts = tcpSink.Install(hosts.Get(3));
+    ts.Start(Seconds(0.0)); ts.Stop(Seconds(20.0));
+    BulkSendHelper tcpSrc("ns3::TcpSocketFactory", InetSocketAddress(i3.GetAddress(1), 8080));
+    tcpSrc.SetAttribute("SendSize", UintegerValue(1024));
+    tcpSrc.SetAttribute("MaxBytes", UintegerValue(0));
+    ApplicationContainer tc = tcpSrc.Install(hosts.Get(0));
+    tc.Start(Seconds(1.0)); tc.Stop(Seconds(20.0));
+
+    // [CS 6] UDP flow n1 -> n2 (port 5000), 512 B, 1 Mbps
+    UdpServerHelper us(5000);
+    ApplicationContainer sa = us.Install(hosts.Get(2));
+    sa.Start(Seconds(0.0)); sa.Stop(Seconds(20.0));
+    UdpClientHelper uc(i2.GetAddress(1), 5000);
+    uc.SetAttribute("MaxPackets", UintegerValue(0xFFFFFFFF));
+    uc.SetAttribute("PacketSize", UintegerValue(512));
+    uc.SetAttribute("Interval", TimeValue(Seconds(512 * 8.0 / 1e6)));
+    ApplicationContainer ca = uc.Install(hosts.Get(1));
+    ca.Start(Seconds(1.0)); ca.Stop(Seconds(20.0));
+
+    AsciiTraceHelper ascii;                                 // [CS 10] packet-level trace
+    access.EnableAsciiAll(ascii.CreateFileStream("packet-trace.tr"));
+
+    FlowMonitorHelper fmh;                                  // [CS 11]
+    Ptr<FlowMonitor> mon = fmh.InstallAll();
+    Simulator::Stop(Seconds(20.0));
+    Simulator::Run();
+    mon->CheckForLostPackets();
+
+    Ptr<Ipv4FlowClassifier> cl = DynamicCast<Ipv4FlowClassifier>(fmh.GetClassifier());
+    for (auto &kv : mon->GetFlowStats()) {
+        Ipv4FlowClassifier::FiveTuple t = cl->FindFlow(kv.first);
+        const auto &s = kv.second;
+        if (t.destinationPort != 8080 && t.destinationPort != 5000) continue;   // skip ACK flows
+        double dur = (s.timeLastRxPacket - s.timeFirstTxPacket).GetSeconds();
+        double thr = dur > 0 ? s.rxBytes * 8.0 / dur / 1e6 : 0;
+        double dly = s.rxPackets > 0 ? s.delaySum.GetSeconds() / s.rxPackets * 1000 : 0;
+        double loss = s.txPackets > 0 ? 100.0 * (s.txPackets - s.rxPackets) / s.txPackets : 0;
+        std::cout << (t.destinationPort == 8080 ? "TCP" : "UDP")
+                  << " Throughput=" << thr << " Mbps  Delay=" << dly
+                  << " ms  Loss=" << loss << " %\n";
+    }
+    Simulator::Destroy();                                   // [CS 11]
+}
+
+
+=====================================================================
+ 15. NS-3 WIRELESS: Wi-Fi + MOBILITY + SPEED         -> scratch/wireless.cc
+     ./ns3 run "scratch/wireless --speed=1"   (then 5 and 10)
+     Zigbee: copy the LrWpan + 6LoWPAN block from cheat sheet section 8
+       as a second scenario (payload <= 80 bytes).
+     Bluetooth: ns-3 has no standard Bluetooth model; write that, and model
+       it as a short-range low-power link (Wi-Fi with TxPower 0 dBm, low rate).
+=====================================================================
+#include "ns3/core-module.h"
+#include "ns3/network-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/wifi-module.h"
+#include "ns3/mobility-module.h"
+#include "ns3/applications-module.h"
+#include "ns3/flow-monitor-module.h"
+using namespace ns3;
+
+// [CS 10] received-signal callback (sum/count is [YOU])
+double sumPwr = 0; int cnt = 0;
+void SniffRxSignal(Ptr<const Packet> p, uint16_t channelFreq, WifiTxVector txVector,
+                   MpduInfo aMpdu, SignalNoiseDbm sn, uint16_t staId) {
+    sumPwr += sn.signal; cnt++;
+}
+
+int main(int argc, char *argv[]) {
+    double speed = 5;                                       // [YOU]
+    CommandLine cmd;
+    cmd.AddValue("speed", "m/s", speed);
+    cmd.Parse(argc, argv);
+
+    NodeContainer sta, ap;                                  // [CS 2]
+    sta.Create(5);
+    ap.Create(1);
+
+    // [CS 8] Wi-Fi channel, PHY, standard, rate manager
+    YansWifiChannelHelper wifiChannel = YansWifiChannelHelper::Default();
+    YansWifiPhyHelper wifiPhy;
+    wifiPhy.SetChannel(wifiChannel.Create());
+    WifiHelper wifi;
+    wifi.SetStandard(WIFI_STANDARD_80211n);
+    wifi.SetRemoteStationManager("ns3::ConstantRateWifiManager",
+        "DataMode", StringValue("HtMcs7"), "ControlMode", StringValue("HtMcs0"));
+
+    // [CS 8] SSID, AP device, station devices
+    WifiMacHelper wifiMac;
+    Ssid ssid = Ssid("campus-wifi");
+    wifiMac.SetType("ns3::ApWifiMac", "Ssid", SsidValue(ssid));
+    NetDeviceContainer apDevice = wifi.Install(wifiPhy, wifiMac, ap);
+    wifiMac.SetType("ns3::StaWifiMac", "Ssid", SsidValue(ssid));
+    NetDeviceContainer staDevices = wifi.Install(wifiPhy, wifiMac, sta);
+
+    // [CS 9] AP fixed, stations random walk (speed string from variable is [YOU])
+    MobilityHelper mobility;
+    mobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
+    mobility.Install(ap);
+    mobility.SetPositionAllocator("ns3::GridPositionAllocator",
+        "MinX", DoubleValue(0.0), "MinY", DoubleValue(0.0),
+        "DeltaX", DoubleValue(5.0), "DeltaY", DoubleValue(5.0),
+        "GridWidth", UintegerValue(5), "LayoutType", StringValue("RowFirst"));
+    mobility.SetMobilityModel("ns3::RandomWalk2dMobilityModel",
+        "Bounds", RectangleValue(Rectangle(-100, 100, -100, 100)),
+        "Speed", StringValue("ns3::ConstantRandomVariable[Constant=" + std::to_string(speed) + "]"));
+    mobility.Install(sta);
+
+    InternetStackHelper internet;                           // [CS 4]
+    internet.Install(sta);
+    internet.Install(ap);
+    Ipv4AddressHelper ipv4;
+    ipv4.SetBase("10.1.1.0", "255.255.255.0");
+    ipv4.Assign(staDevices);
+    Ipv4InterfaceContainer apIf = ipv4.Assign(apDevice);
+
+    // [CS 6] UDP: server on AP, client on every station ([YOU] GetAddress(0) = AP)
+    UdpServerHelper server(5000);
+    ApplicationContainer sApp = server.Install(ap.Get(0));
+    sApp.Start(Seconds(0.0)); sApp.Stop(Seconds(20.0));
+    UdpClientHelper client(apIf.GetAddress(0), 5000);
+    client.SetAttribute("MaxPackets", UintegerValue(0xFFFFFFFF));
+    client.SetAttribute("PacketSize", UintegerValue(512));
+    client.SetAttribute("Interval", TimeValue(Seconds(0.01)));
+    ApplicationContainer cApp = client.Install(sta);
+    cApp.Start(Seconds(2.0)); cApp.Stop(Seconds(20.0));
+
+    Config::ConnectWithoutContext(                          // [CS 10] signal strength hook
+        "/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Phy/MonitorSnifferRx",
+        MakeCallback(&SniffRxSignal));
+
+    FlowMonitorHelper fmh;                                  // [CS 11]
+    Ptr<FlowMonitor> mon = fmh.InstallAll();
+    Simulator::Stop(Seconds(20.0));
+    Simulator::Run();
+    mon->CheckForLostPackets();
+
+    Ptr<Ipv4FlowClassifier> cl = DynamicCast<Ipv4FlowClassifier>(fmh.GetClassifier());
+    double thr = 0, dly = 0, tx = 0, rx = 0, n = 0;         // [YOU] add up the 5 flows
+    for (auto &kv : mon->GetFlowStats()) {
+        if (cl->FindFlow(kv.first).destinationPort != 5000) continue;
+        const auto &s = kv.second;
+        double dur = (s.timeLastRxPacket - s.timeFirstTxPacket).GetSeconds();
+        if (dur > 0) thr += s.rxBytes * 8.0 / dur / 1e6;
+        if (s.rxPackets > 0) dly += s.delaySum.GetSeconds() / s.rxPackets * 1000;
+        tx += s.txPackets; rx += s.rxPackets; n++;
+    }
+    std::cout << "Speed " << speed << " m/s | Signal " << (cnt ? sumPwr / cnt : 0) << " dBm"
+              << " | Throughput " << thr << " Mbps | Delay " << (n ? dly / n : 0) << " ms"
+              << " | Loss " << (tx ? 100.0 * (tx - rx) / tx : 0) << " %\n";
+    Simulator::Destroy();                                   // [CS 11]
+}
+ Expected trend: higher speed -> weaker signal, more loss, more delay,
+ lower throughput (results vary, random walk).
+
+
+=====================================================================
+ 16. NS-3 TCP VARIANTS (VANET, 5 vehicles)           -> scratch/vanet.cc
+     ./ns3 run "scratch/vanet --tcp=TcpNewReno"
+     ./ns3 run "scratch/vanet --tcp=TcpCubic"
+     ./ns3 run "scratch/vanet --tcp=TcpBbr"
+     (older ns-3: ./waf --run ; newer may call Reno TcpLinuxReno)
+=====================================================================
+#include "ns3/core-module.h"
+#include "ns3/network-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/point-to-point-module.h"
+#include "ns3/applications-module.h"
+#include "ns3/flow-monitor-module.h"
+#include "ns3/traffic-control-module.h"
+using namespace ns3;
+
+// [YOU] prints the congestion window of vehicle 1 whenever it changes
+static void Cwnd(uint32_t oldV, uint32_t newV) {
+    printf("cwnd %.2f %u\n", Simulator::Now().GetSeconds(), newV);
+}
+static void ConnectCwnd() {
+    Config::ConnectWithoutContext(
+        "/NodeList/0/$ns3::TcpL4Protocol/SocketList/0/CongestionWindow", MakeCallback(&Cwnd));
+}
+
+int main(int argc, char *argv[]) {
+    std::string tcp = "TcpNewReno";                         // [YOU]
+    CommandLine cmd;
+    cmd.AddValue("tcp", "variant", tcp);
+    cmd.Parse(argc, argv);
+
+    // [CS 5] TCP variant, MSS, BBR pacing
+    Config::SetDefault("ns3::TcpL4Protocol::SocketType", StringValue("ns3::" + tcp));
+    Config::SetDefault("ns3::TcpSocket::SegmentSize", UintegerValue(1024));
+    Config::SetDefault("ns3::TcpSocketState::EnablePacing", BooleanValue(true));
+
+    NodeContainer v, r, srv;                                // [CS 2] vehicles, router, server
+    v.Create(5); r.Create(1); srv.Create(1);
+    InternetStackHelper internet;                           // [CS 4]
+    internet.InstallAll();
+
+    PointToPointHelper p2p;                                 // [CS 3]
+    Ipv4AddressHelper ip;
+    p2p.SetDeviceAttribute("DataRate", StringValue("100Mbps"));
+    p2p.SetChannelAttribute("Delay", StringValue("2ms"));
+    for (int i = 0; i < 5; i++) {                           // [YOU] loop: vehicle i <-> router
+        ip.SetBase(("10.1." + std::to_string(i + 1) + ".0").c_str(), "255.255.255.0");
+        ip.Assign(p2p.Install(v.Get(i), r.Get(0)));
+    }
+    p2p.SetDeviceAttribute("DataRate", StringValue("10Mbps"));   // bottleneck router -> server
+    p2p.SetChannelAttribute("Delay", StringValue("20ms"));
+    p2p.SetQueue("ns3::DropTailQueue<Packet>", "MaxSize", StringValue("50p"));
+    NetDeviceContainer sd = p2p.Install(r.Get(0), srv.Get(0));
+    ip.SetBase("10.2.1.0", "255.255.255.0");
+    Ipv4InterfaceContainer sif = ip.Assign(sd);
+    Ipv4Address serverIp = sif.GetAddress(1);               // [CS 4] receiver = index 1
+    Ipv4GlobalRoutingHelper::PopulateRoutingTables();
+    TrafficControlHelper tch;                               // [CS 3]
+    tch.Uninstall(sd);
+
+    // [CS 6] sink on the server, BulkSend on every vehicle
+    PacketSinkHelper sink("ns3::TcpSocketFactory", InetSocketAddress(Ipv4Address::GetAny(), 8080));
+    ApplicationContainer sa = sink.Install(srv.Get(0));
+    sa.Start(Seconds(0.0)); sa.Stop(Seconds(20.0));
+    BulkSendHelper src("ns3::TcpSocketFactory", InetSocketAddress(serverIp, 8080));
+    ApplicationContainer ca = src.Install(v);
+    ca.Start(Seconds(1.0)); ca.Stop(Seconds(19.0));
+    Simulator::Schedule(Seconds(1.001), &ConnectCwnd);      // [YOU] start cwnd trace
+
+    FlowMonitorHelper fmh;                                  // [CS 11]
+    Ptr<FlowMonitor> mon = fmh.InstallAll();
+    Simulator::Stop(Seconds(20.0));
+    Simulator::Run();
+    mon->CheckForLostPackets();
+
+    Ptr<Ipv4FlowClassifier> cl = DynamicCast<Ipv4FlowClassifier>(fmh.GetClassifier());
+    double sum = 0, sq = 0; int n = 0;
+    for (auto &kv : mon->GetFlowStats()) {
+        if (cl->FindFlow(kv.first).destinationAddress != serverIp) continue;   // skip ACK flows
+        const auto &s = kv.second;
+        double dur = (s.timeLastRxPacket - s.timeFirstTxPacket).GetSeconds();
+        double thr = dur > 0 ? s.rxBytes * 8.0 / dur / 1e6 : 0;
+        double dly = s.rxPackets > 0 ? s.delaySum.GetSeconds() / s.rxPackets * 1000 : 0;
+        printf("Flow %u: thr=%.2f Mbps delay=%.2f ms lost=%u/%u\n",
+               kv.first, thr, dly, s.lostPackets, s.txPackets);
+        sum += thr; sq += thr * thr; n++;
+    }
+    // [CS 12] Jain's fairness index = (sum x)^2 / (n * sum x^2)
+    printf("%s total=%.2f Mbps fairness=%.3f\n", tcp.c_str(), sum, n ? sum * sum / (n * sq) : 0);
+    Simulator::Destroy();
+}
+ Expected: Reno lowest throughput; Cubic highest throughput but fills the
+ queue (more delay); BBR keeps queue short (lowest delay, steady cwnd).
+ Why low delay matters: safety messages (collision/braking alerts) must arrive
+ in milliseconds (at 90 km/h a car moves 25 m per second); stale data gives wrong
+ routing and signal decisions; loss causes retransmissions that add delay.
