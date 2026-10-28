@@ -1,0 +1,289 @@
+=====================================================================
+ METRICS CODE FOR EVERY CN LAB QUESTION (copy-paste snippets)
+ Part A = C socket programs, Part B = NS-3 programs
+=====================================================================
+
+
+#####################################################################
+ PART A: C SOCKET PROGRAMS
+#####################################################################
+
+---------------------------------------------------------------------
+ A0. TIMER HELPER (paste once at the top of any C program, after includes)
+---------------------------------------------------------------------
+#include <time.h>
+
+double now() {                                   // wall-clock seconds
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec + t.tv_nsec / 1e9;
+}
+
+ (do NOT use clock(): it measures CPU time, not network waiting time)
+
+
+---------------------------------------------------------------------
+ A1. RTT / LATENCY  (TCP or UDP client, any request-reply program)
+     Used in: student lookup, DNS, any echo
+---------------------------------------------------------------------
+    double t1 = now();
+    send(s, msg, strlen(msg), 0);                // or sendto(...)
+    recv(s, buf, 99, 0);                         // or recvfrom(...)
+    double t2 = now();
+    double rtt = (t2 - t1) * 1000;               // milliseconds
+    printf("RTT = %.3f ms\n", rtt);
+    printf("One-way latency (approx) = %.3f ms\n", rtt / 2);
+
+ Average over N tries:
+    double sum = 0;
+    for (int i = 0; i < 10; i++) {
+        double a = now();
+        sendto(...); recvfrom(...);
+        sum += (now() - a) * 1000;
+    }
+    printf("Avg RTT = %.3f ms\n", sum / 10);
+
+
+---------------------------------------------------------------------
+ A2. THROUGHPUT  (any program that moves bytes)
+---------------------------------------------------------------------
+    long bytes = total_bytes_received;           // e.g. the body size
+    double secs = t_end - t_start;
+    printf("Throughput = %.2f Mbps\n", bytes * 8 / secs / 1e6);
+    printf("Throughput = %.2f KB/s\n", bytes / 1024.0 / secs);
+
+
+---------------------------------------------------------------------
+ A3. HTTP CLIENT: response time, download time, data size, throughput
+     (Assignment 3). Times to capture: t_send, t_first, t_end
+---------------------------------------------------------------------
+    double t_send = now();
+    send(s, req, strlen(req), 0);
+
+    int total = 0, n;
+    double t_first = 0;
+    while ((n = recv(s, data + total, 100000, 0)) > 0) {
+        if (total == 0) t_first = now();         // first byte arrived
+        total += n;
+    }
+    double t_end = now();
+
+    char *body = strstr(data, "\r\n\r\n") + 4;   // skip HTTP headers
+    int size = total - (body - data);            // data size = body only
+
+    printf("Response time : %.4f s\n", t_first - t_send);   // request -> first byte
+    printf("Download time : %.4f s\n", t_end - t_first);    // first byte -> last byte
+    printf("Data size     : %d bytes\n", size);
+    printf("Throughput    : %.2f Mbps\n", size * 8 / (t_end - t_first) / 1e6);
+
+ (Optional) TCP connection time:  double c1 = now(); connect(...); double c2 = now();
+ printf("Connect time: %.4f s\n", c2 - c1);
+ (HTTPS version: also time SSL_connect() the same way = SSL handshake time.)
+
+
+---------------------------------------------------------------------
+ A4. DNS (UDP): RTT, cache hit, timeout, loss rate
+---------------------------------------------------------------------
+    // globals
+    int sent = 0, got = 0, hits = 0;
+
+    // per query
+    sent++;
+    double t1 = now();
+    sendto(s, d, strlen(d), 0, (struct sockaddr *)&a, sizeof(a));
+    int n = recvfrom(s, buf, 99, 0, NULL, NULL);
+    double t2 = now();
+    if (n < 0) printf("TIMEOUT\n");
+    else { got++; printf("RTT %.3f ms\n", (t2 - t1) * 1000); }
+
+    // on a cache hit:  hits++;
+
+    // at exit
+    printf("Queries %d, replies %d, loss %.1f %%, cache hits %d\n",
+           sent, got, 100.0 * (sent - got) / sent, hits);
+
+ Needs for timeout:  struct timeval tv = {2, 0};
+                     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+
+---------------------------------------------------------------------
+ A5. RETRANSMISSION COUNT + PACKET LOSS (stop-and-wait over UDP)
+     Used for the "timers and retransmissions" topic
+---------------------------------------------------------------------
+    int retx = 0, tries = 0;
+    for (int seq = 0; seq < 10; seq++) {
+        int acked = 0;
+        while (!acked && tries < 100) {
+            sendto(s, msg, strlen(msg), 0, (struct sockaddr *)&a, sizeof(a));
+            tries++;
+            if (recvfrom(s, buf, 99, 0, NULL, NULL) >= 0) acked = 1;
+            else retx++;                         // timeout -> send again
+        }
+    }
+    printf("Packets 10, transmissions %d, retransmissions %d\n", tries, retx);
+    printf("Loss rate = %.1f %%\n", 100.0 * retx / tries);
+
+
+---------------------------------------------------------------------
+ A6. CRC / CHECKSUM: error detection result + counts
+---------------------------------------------------------------------
+    int total = 0, detected = 0;
+    // for each test frame (with or without a flipped bit)
+    total++;
+    if (strchr(rem, '1')) detected++;            // non-zero remainder = error found
+    printf("Frames %d, errors detected %d, detection rate %.1f %%\n",
+           total, detected, 100.0 * detected / total);
+
+ Overhead of CRC-4: 4 extra bits per frame:
+    printf("Overhead = %.1f %%\n", 100.0 * 4 / strlen(frame));
+
+
+#####################################################################
+ PART B: NS-3 PROGRAMS (all metrics from FlowMonitor)
+#####################################################################
+
+---------------------------------------------------------------------
+ B1. FULL FLOWMONITOR BLOCK: throughput, delay, jitter, loss, PDR,
+     lost packets, fairness. Paste after Simulator::Run() and
+     mon->CheckForLostPackets();   Needs:  FlowMonitorHelper fmh;
+     Ptr<FlowMonitor> mon = fmh.InstallAll();  before Run().
+---------------------------------------------------------------------
+    Ptr<Ipv4FlowClassifier> cl = DynamicCast<Ipv4FlowClassifier>(fmh.GetClassifier());
+    double sumThr = 0, sumSq = 0; int nFlows = 0;
+
+    for (auto &kv : mon->GetFlowStats()) {
+        Ipv4FlowClassifier::FiveTuple t = cl->FindFlow(kv.first);
+        const auto &s = kv.second;
+
+        // keep only the data flows (skip the TCP ACK flows going back)
+        if (t.destinationPort != 8080 && t.destinationPort != 5000 &&
+            t.destinationPort != 9000) continue;                 // your ports
+
+        double dur  = (s.timeLastRxPacket - s.timeFirstTxPacket).GetSeconds();
+        double thr  = dur > 0 ? s.rxBytes * 8.0 / dur / 1e6 : 0;           // Mbps
+        double dly  = s.rxPackets > 0 ? s.delaySum.GetSeconds() / s.rxPackets * 1000 : 0;   // ms
+        double jit  = s.rxPackets > 1 ? s.jitterSum.GetSeconds() / (s.rxPackets - 1) * 1000 : 0;  // ms
+        double loss = s.txPackets > 0 ? 100.0 * (s.txPackets - s.rxPackets) / s.txPackets : 0;    // %
+        double pdr  = 100.0 - loss;                                         // %
+
+        std::cout << "Flow " << kv.first << " (" << t.sourceAddress << " -> "
+                  << t.destinationAddress << ":" << t.destinationPort << ")\n"
+                  << "  Tx packets   : " << s.txPackets << "\n"
+                  << "  Rx packets   : " << s.rxPackets << "\n"
+                  << "  Lost packets : " << s.lostPackets << "\n"
+                  << "  Throughput   : " << thr << " Mbps\n"
+                  << "  Avg delay    : " << dly << " ms\n"
+                  << "  Jitter       : " << jit << " ms\n"
+                  << "  Packet loss  : " << loss << " %\n"
+                  << "  PDR          : " << pdr << " %\n";
+
+        sumThr += thr; sumSq += thr * thr; nFlows++;
+    }
+    // Jain's fairness index (1.0 = perfectly fair)
+    if (nFlows) std::cout << "Fairness = " << sumThr * sumThr / (nFlows * sumSq) << "\n";
+
+
+---------------------------------------------------------------------
+ B2. TCP RETRANSMISSION RATE (approximation, say this in your answer)
+---------------------------------------------------------------------
+ Each TCP segment dropped in the network is retransmitted, so for the TCP
+ flow:
+        retransmission rate (%)  ~  (txPackets - rxPackets) / txPackets * 100
+ In code, inside the loop above, for the TCP port only:
+        if (t.destinationPort == 8080)
+            std::cout << "  TCP retransmission rate ~ " << loss << " %\n";
+ (An exact count needs a TCP socket trace hook; the dropped-packet
+ approximation is accepted for this lab.)
+ You can also count drops directly in the ASCII trace file:
+        grep -c "^d" packet-trace.tr       # number of dropped packets
+
+
+---------------------------------------------------------------------
+ B3. PER-FLOW LABEL (TCP vs UDP) for the two-flow questions
+---------------------------------------------------------------------
+    std::cout << (t.destinationPort == 8080 ? "TCP" : "UDP") << " ...";
+
+
+---------------------------------------------------------------------
+ B4. CONGESTION WINDOW (cwnd) TRACE  (TCP variants question)
+     Add these two functions above main():
+---------------------------------------------------------------------
+static void Cwnd(uint32_t oldV, uint32_t newV) {
+    printf("cwnd %.2f %u\n", Simulator::Now().GetSeconds(), newV);
+}
+static void ConnectCwnd() {
+    Config::ConnectWithoutContext(
+        "/NodeList/0/$ns3::TcpL4Protocol/SocketList/0/CongestionWindow",
+        MakeCallback(&Cwnd));
+}
+ and in main(), before Simulator::Run():
+    Simulator::Schedule(Seconds(1.001), &ConnectCwnd);   // after the socket exists
+
+ Save and plot:
+    ./ns3 run "scratch/vanet --tcp=TcpCubic" | grep cwnd > cwnd_cubic.txt
+    python3 -c "import matplotlib.pyplot as p; d=[l.split() for l in open('cwnd_cubic.txt')]; p.plot([float(x[1]) for x in d],[int(x[2]) for x in d]); p.xlabel('time s'); p.ylabel('cwnd bytes'); p.show()"
+
+
+---------------------------------------------------------------------
+ B5. RECEIVED SIGNAL STRENGTH (dBm)  (Wi-Fi / mobility question)
+     Above main():
+---------------------------------------------------------------------
+double sumPwr = 0; int cnt = 0;
+void SniffRxSignal(Ptr<const Packet> p, uint16_t channelFreq, WifiTxVector txVector,
+                   MpduInfo aMpdu, SignalNoiseDbm sn, uint16_t staId) {
+    sumPwr += sn.signal; cnt++;
+}
+     In main(), before Run():
+    Config::ConnectWithoutContext(
+        "/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Phy/MonitorSnifferRx",
+        MakeCallback(&SniffRxSignal));
+     After Run():
+    std::cout << "Avg signal = " << (cnt ? sumPwr / cnt : 0) << " dBm\n";
+
+
+---------------------------------------------------------------------
+ B6. SUMMING SEVERAL FLOWS INTO ONE ROW (e.g. 5 stations -> 1 AP)
+---------------------------------------------------------------------
+    double thr = 0, dly = 0, tx = 0, rx = 0, n = 0;
+    for (auto &kv : mon->GetFlowStats()) {
+        if (cl->FindFlow(kv.first).destinationPort != 5000) continue;
+        const auto &s = kv.second;
+        double dur = (s.timeLastRxPacket - s.timeFirstTxPacket).GetSeconds();
+        if (dur > 0) thr += s.rxBytes * 8.0 / dur / 1e6;                       // total throughput
+        if (s.rxPackets > 0) dly += s.delaySum.GetSeconds() / s.rxPackets * 1000;
+        tx += s.txPackets; rx += s.rxPackets; n++;
+    }
+    std::cout << "Throughput " << thr << " Mbps | Delay " << (n ? dly / n : 0)
+              << " ms | Loss " << (tx ? 100.0 * (tx - rx) / tx : 0) << " %\n";
+
+
+---------------------------------------------------------------------
+ B7. SAVE RESULTS TO CSV + PLOT (for "plot graphs" questions)
+     Needs  #include <fstream>
+---------------------------------------------------------------------
+    std::ofstream f("results.csv", std::ios::app);      // append one row per run
+    f << proto << "," << mode << "," << thr << "," << dly << "," << loss << "," << pdr << "\n";
+
+ plot.py:
+    import sys, matplotlib.pyplot as plt
+    rows = [l.strip().split(',') for l in open(sys.argv[1]) if l.strip()]
+    names = ['Throughput (Mbps)', 'Delay (ms)', 'Loss (%)', 'PDR (%)']
+    fig, ax = plt.subplots(1, 4, figsize=(14, 3.5))
+    for k in range(4):
+        ax[k].bar([r[0] + '-' + r[1] for r in rows], [float(r[2 + k]) for r in rows])
+        ax[k].set_title(names[k])
+    plt.tight_layout(); plt.savefig('plot.png'); plt.show()
+ Run:  python3 plot.py results.csv
+
+
+---------------------------------------------------------------------
+ B8. FORMULAS (write these in the report)
+---------------------------------------------------------------------
+ Throughput (Mbps) = rxBytes x 8 / (timeLastRx - timeFirstTx) / 10^6
+ Avg delay (ms)    = delaySum / rxPackets x 1000
+ Jitter (ms)       = jitterSum / (rxPackets - 1) x 1000
+ Packet loss (%)   = (txPackets - rxPackets) / txPackets x 100
+ PDR (%)           = rxPackets / txPackets x 100
+ Fairness (Jain)   = (sum xi)^2 / (n x sum xi^2)
+ UDP interval (s)  = packetSizeBytes x 8 / dataRateBps
+ RTT (C sockets)   = time(reply received) - time(request sent)
