@@ -860,4 +860,233 @@ int main(int argc, char *argv[]) {
  queue (more delay); BBR keeps queue short (lowest delay, steady cwnd).
  Why low delay matters: safety messages (collision/braking alerts) must arrive
  in milliseconds (at 90 km/h a car moves 25 m per second); stale data gives wrong
- routing and signal decisions; loss causes retransmissions that add delay.
+=====================================================================
+ STUDENT RECORD LOOKUP (CSV) - TCP (pthread) AND UDP, IN C
+=====================================================================
+
+HOW TO RUN
+----------
+1. Make a folder and put everything in it:
+       mkdir csvlab && cd csvlab
+
+2. Create the data file students.csv in that same folder (no header row):
+       101,Arun,CSE,5,8.7
+       102,Meena,IT,3,9.1
+       103,Ravi,ECE,4,7.9
+   (fields: Roll Number, Name, Department, Semester, CGPA)
+
+3. Save the four programs below as:
+       tcp_server.c   tcp_client.c   udp_server.c   udp_client.c
+
+4. Compile:
+       gcc tcp_server.c -o tcp_server -pthread
+       gcc tcp_client.c -o tcp_client
+       gcc udp_server.c -o udp_server
+       gcc udp_client.c -o udp_client
+
+5. TCP test (use 3 terminals; always start the SERVER first):
+       Terminal 1:  ./tcp_server
+       Terminal 2:  ./tcp_client      -> type 101   (full record)
+       Terminal 3:  ./tcp_client      -> type 999   (Student Record Not Found)
+   Run two clients at the same time to show multi-client handling.
+
+6. UDP test:
+       Terminal 1:  ./udp_server
+       Terminal 2:  ./udp_client      -> type 102   (roll number + name only)
+                                         type 999   (Student Record Not Found)
+
+Notes:
+ - Run the server from the folder that contains students.csv.
+ - Ports 8080 (TCP) and 8081 (UDP) are above 1024, so no root is needed.
+ - "Address already in use" on restart: wait a few seconds (the TCP server
+   already sets SO_REUSEADDR).
+ - To test threading: add sleep(5); inside handle() before send(), start two
+   clients together, both should answer after about 5 s, not 5 s and 10 s.
+
+
+=====================================================================
+ 1(a) TCP SERVER - handles many clients with pthread     tcp_server.c
+=====================================================================
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+
+// Runs in its own thread, one thread per client
+void *handle(void *arg) {
+    int c = *(int *)arg;                 // client socket
+    free(arg);                           // we copied it out, free the box
+
+    char roll[100] = {0}, line[200], r[50];
+    recv(c, roll, 99, 0);                // 3. receive the roll number
+    roll[strcspn(roll, "\r\n")] = 0;     // strip newline
+
+    char reply[200] = "Student Record Not Found";   // default answer (step 6)
+    FILE *f = fopen("students.csv", "r");
+    while (f && fgets(line, 200, f)) {   // 4. search the CSV line by line
+        sscanf(line, "%49[^,]", r);      // first field = roll number
+        if (strcmp(r, roll) == 0) {      // 5. found: send complete details
+            strcpy(reply, line);
+            break;
+        }
+    }
+    if (f) fclose(f);
+
+    send(c, reply, strlen(reply), 0);
+    close(c);                            // close gracefully
+    return NULL;
+}
+
+int main() {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    int opt = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(8080);
+    a.sin_addr.s_addr = INADDR_ANY;
+    bind(s, (struct sockaddr *)&a, sizeof(a));
+    listen(s, 5);
+    printf("TCP server listening on port 8080\n");
+
+    while (1) {                          // 2. keep accepting clients forever
+        int *c = malloc(sizeof(int));    // own copy of the socket number per client
+        *c = accept(s, NULL, NULL);
+        pthread_t t;
+        pthread_create(&t, NULL, handle, c);   // hand the client to a new thread
+        pthread_detach(t);                     // don't wait for it
+    }
+}
+
+
+=====================================================================
+ 1(a) TCP CLIENT                                         tcp_client.c
+=====================================================================
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+
+int main() {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(8080);
+    a.sin_addr.s_addr = inet_addr("127.0.0.1");    // server address
+    if (connect(s, (struct sockaddr *)&a, sizeof(a)) < 0) {
+        perror("connect failed (is the server running?)");
+        return 1;
+    }
+
+    char roll[100], buf[200] = {0};
+    printf("Enter Roll Number: ");
+    scanf("%99s", roll);                           // 3. prompt user
+    send(s, roll, strlen(roll), 0);                // send to server
+    recv(s, buf, 199, 0);                          // 7. receive result
+    printf("Server: %s\n", buf);                   // display it
+    close(s);                                      // close the connection gracefully
+    return 0;
+}
+
+
+=====================================================================
+ 1(b) UDP SERVER - sends back only roll number and name   udp_server.c
+=====================================================================
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+
+int main() {
+    int s = socket(AF_INET, SOCK_DGRAM, 0);        // DGRAM = UDP
+    struct sockaddr_in a = {0}, c;                 // c = client's address
+    socklen_t cl = sizeof(c);
+    a.sin_family = AF_INET;
+    a.sin_port = htons(8081);
+    a.sin_addr.s_addr = INADDR_ANY;
+    bind(s, (struct sockaddr *)&a, sizeof(a));
+    printf("UDP server listening on port 8081\n");
+
+    while (1) {
+        char roll[100] = {0}, line[200], r[50], n[50];
+        char reply[200] = "Student Record Not Found";
+
+        // recvfrom also fills c with the sender's address, needed to reply
+        recvfrom(s, roll, 99, 0, (struct sockaddr *)&c, &cl);
+        roll[strcspn(roll, "\r\n")] = 0;
+
+        FILE *f = fopen("students.csv", "r");
+        while (f && fgets(line, 200, f)) {
+            sscanf(line, "%49[^,],%49[^,]", r, n);        // roll number and name
+            if (strcmp(r, roll) == 0) {
+                sprintf(reply, "%s %s", r, n);            // only roll number + name
+                break;
+            }
+        }
+        if (f) fclose(f);
+
+        sendto(s, reply, strlen(reply), 0, (struct sockaddr *)&c, cl);
+    }
+}
+
+
+=====================================================================
+ 1(b) UDP CLIENT                                          udp_client.c
+=====================================================================
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+
+int main() {
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    struct timeval tv = {3, 0};                    // 3 s timeout so we never wait forever
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(8081);
+    a.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    char roll[100], buf[200] = {0};
+    printf("Enter Roll Number: ");
+    scanf("%99s", roll);
+    sendto(s, roll, strlen(roll), 0, (struct sockaddr *)&a, sizeof(a));   // one datagram
+    if (recvfrom(s, buf, 199, 0, NULL, NULL) < 0)
+        printf("No reply (datagram lost or server down)\n");
+    else
+        printf("Server: %s\n", buf);               // display the response
+    return 0;                                      // terminate
+}
+
+
+=====================================================================
+ 1(c) COMPARISON OF THE TWO IMPLEMENTATIONS (write this as the answer)
+=====================================================================
+ Feature        | TCP implementation              | UDP implementation
+ ---------------+---------------------------------+----------------------------------
+ Connection     | Connection-oriented: 3-way      | Connectionless: no handshake, just
+                | handshake (listen/accept/       | sendto/recvfrom; server does not
+                | connect); one socket per client | keep per-client state
+ Reliability    | Reliable: ACKs and              | Unreliable: no ACKs, a lost request
+                | retransmission, so the request  | or reply is simply gone (client
+                | and reply always arrive         | timeout is the only protection)
+ Ordering       | In-order byte stream (sequence  | No ordering guarantee; each
+                | numbers)                        | datagram is independent
+ Error recovery | Detects loss/corruption and     | Only an optional checksum; the
+                | retransmits; flow and           | application must detect loss and
+                | congestion control              | retry
+ Communication  | Byte stream, no message         | Message boundaries preserved (one
+                | boundaries; higher overhead     | datagram = one message); small
+                | (20-byte header, setup, close)  | 8-byte header, lower latency
+ Concurrency    | Needs threads/processes (here   | One socket serves all clients,
+                | pthread) to serve many clients  | no threads needed
+
+ Conclusion: TCP suits the full-profile lookup where the answer must arrive
+ intact; UDP suits a quick, small verify query where speed matters more and
+ an occasional retry is acceptable. routing and signal decisions; loss causes retransmissions that add delay.
